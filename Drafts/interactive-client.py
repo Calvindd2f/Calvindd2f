@@ -9,12 +9,12 @@ def interact(socket):
     t.interact()
 
 client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-host = socket.gethostname()
-port = 8080
+host = '192.168.92.68'
+port = 2003
 
 client.connect((host, port)) # Connect to our client
 msg = client.recv(1024)
 print (msg.decode('ascii'))
 
-
+interact(client)
 client.close()
