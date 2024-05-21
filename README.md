@@ -13,7 +13,10 @@ Here are some ideas to get you started:
 - 📫 How to reach me: ...
 - 😄 Pronouns: ...
 - ⚡ Fun fact: ...
+
+
+<a href="https://gitroll.io/profile/uS1StpVxHvMgnTSiP7EiouRhhai63" target="_blank"><img src="https://gitroll.io/api/badges/profiles/v1/uS1StpVxHvMgnTSiP7EiouRhhai63" alt="GitRoll Profile Badge"/></a>
+
 -->
 ![Top Langs](https://github-readme-stats.vercel.app/api/top-langs/?username=calvindd2f&langs_count=8)
  
-<a href="https://gitroll.io/profile/uS1StpVxHvMgnTSiP7EiouRhhai63" target="_blank"><img src="https://gitroll.io/api/badges/profiles/v1/uS1StpVxHvMgnTSiP7EiouRhhai63" alt="GitRoll Profile Badge"/></a>
