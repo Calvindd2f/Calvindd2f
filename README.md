@@ -24,4 +24,23 @@ lol
 ---
 
 ![Top Langs](https://github-readme-stats.vercel.app/api/top-langs/?username=calvindd2f&langs_count=8)
+
+
+
  
+
+[Microsoft Expert Certificed x2](https://learn.microsoft.com/en-us/users/calvinbergin/transcript/dz2oefqpj6xzqx1?ref=https%3A%2F%2Fwww.linkedin.com%2F&source=docs&tab=credentials-tab)
++ Microsoft 365 Certified: Administrator Expert
++ Microsoft Certified: Azure Solutions Architect Expert
+
+[Microsoft Associate Certified x4](https://learn.microsoft.com/en-us/users/calvinbergin/transcript/dz2oefqpj6xzqx1?ref=https%3A%2F%2Fwww.linkedin.com%2F&source=docs&tab=credentials-tab)
++ Microsoft Certified: Azure Administrator Associate
++ Microsoft Certified: Security Operations Analyst Associate
++ Microsoft Certified: Information Protection and Compliance Administrator Associate
++ Microsoft Certified: Azure Security Engineer Associate
+
+**Other certificates**:
++ SBT Blue Team Level 1
++ Offsec PEN-100
++ OffSec SOC-100
++ Cisco CCNA
