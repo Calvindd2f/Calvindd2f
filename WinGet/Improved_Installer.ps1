@@ -7,7 +7,7 @@ Add-Type -TypeDefinition @"
     }
 "@
 
-# Add our core execution context handler
+# Add our core execution context handler with async support
 Add-Type -TypeDefinition @"
 using System;
 using System.Runtime.InteropServices;
@@ -15,6 +15,10 @@ using System.Security.Principal;
 using System.Diagnostics;
 using System.ComponentModel;
 using System.Text;
+using System.Threading.Tasks;
+using System.Collections.Concurrent;
+using System.Linq;
+using System.Threading;
 
 public class ProcessExecutor {
     #region Win32 API Constants
@@ -146,7 +150,7 @@ public class ProcessExecutor {
     private static extern bool CloseHandle(IntPtr hObject);
     #endregion
 
-    public static (int exitCode, string output) ExecuteProcessAsUser(string command, bool elevated) {
+    public static async Task<(int exitCode, string output)> ExecuteProcessAsUserAsync(string command, bool elevated, CancellationToken cancellationToken = default) {
         IntPtr hUserToken = IntPtr.Zero;
         IntPtr hDupToken = IntPtr.Zero;
         IntPtr hEnvironment = IntPtr.Zero;
@@ -205,8 +209,24 @@ public class ProcessExecutor {
                 throw new Win32Exception(Marshal.GetLastWin32Error());
 
             process = Process.GetProcessById((int)pi.dwProcessId);
-            process.WaitForExit();
+            
+            // Create a TaskCompletionSource for async wait
+            var tcs = new TaskCompletionSource<bool>();
+            
+            // Handle process exit asynchronously
+            process.EnableRaisingEvents = true;
+            process.Exited += (sender, args) => tcs.TrySetResult(true);
+            
+            // Register cancellation
+            cancellationToken.Register(() => {
+                try {
+                    if (!process.HasExited) process.Kill();
+                } catch { }
+            });
 
+            // Wait for either process exit or cancellation
+            await tcs.Task;
+            
             return (process.ExitCode, process.StandardOutput.ReadToEnd());
         }
         finally {
@@ -237,10 +257,19 @@ function Execute-WinGet {
     [CmdletBinding()]
     param (
         [Parameter(Mandatory = $true)]
-        [string]$Command,
+        [string[]]$Packages,
 
         [Parameter(Mandatory = $false)]
-        [ExecutionEnvironment]$ExecutionEnvironment = [ExecutionEnvironment]::System
+        [ExecutionEnvironment]$ExecutionEnvironment = [ExecutionEnvironment]::RunAsUserElevated,
+
+        [Parameter(Mandatory = $false)]
+        [int]$MaxConcurrent = 3,
+
+        [Parameter(Mandatory = $false)]
+        [switch]$AcceptSourceAgreements,
+
+        [Parameter(Mandatory = $false)]
+        [switch]$AcceptPackageAgreements
     )
 
     $appPath = $(Get-ChildItem -Path 'C:\Program Files\WindowsApps' |
@@ -252,48 +281,82 @@ function Execute-WinGet {
         throw "WinGet not found at expected location: $wingetPath"
     }
 
-    $fullCommand = "`"$wingetPath`" $Command"
-    Write-Verbose "Executing command: $fullCommand"
-    Write-Verbose "Execution Environment: $ExecutionEnvironment"
-
+    # Create cancellation token source for managing concurrent operations
+    $cts = [System.Threading.CancellationTokenSource]::new()
+    
+    # Create a collection to store the results
+    $results = [System.Collections.Concurrent.ConcurrentDictionary[string,hashtable]]::new()
+    
     try {
-        switch ($ExecutionEnvironment) {
-            'System' {
-                # Execute as SYSTEM
-                $process = Start-Process -FilePath $wingetPath -ArgumentList $Command -Wait -PassThru -NoNewWindow
-                return @{
-                    ExitCode = $process.ExitCode
-                    Output   = $process.StandardOutput.ReadToEnd()
+        # Create an array of installation tasks
+        $tasks = $Packages | ForEach-Object {
+            $package = $_
+            [System.Threading.Tasks.Task]::Run([Action]({
+                try {
+                    $arguments = "install $package --silent"
+                    if ($AcceptSourceAgreements) { $arguments += " --accept-source-agreements" }
+                    if ($AcceptPackageAgreements) { $arguments += " --accept-package-agreements" }
+                    
+                    $fullCommand = "`"$wingetPath`" $arguments"
+                    Write-Verbose "Executing command: $fullCommand"
+                    
+                    switch ($ExecutionEnvironment) {
+                        'System' {
+                            $process = Start-Process -FilePath $wingetPath -ArgumentList $arguments -Wait -PassThru -NoNewWindow
+                            $result = @{
+                                ExitCode = $process.ExitCode
+                                Output = ""
+                            }
+                        }
+                        'RunAsUser' {
+                            $result = [ProcessExecutor]::ExecuteProcessAsUserAsync($fullCommand, $false, $cts.Token).GetAwaiter().GetResult()
+                        }
+                        'RunAsUserElevated' {
+                            $result = [ProcessExecutor]::ExecuteProcessAsUserAsync($fullCommand, $true, $cts.Token).GetAwaiter().GetResult()
+                        }
+                    }
+                    
+                    $results.TryAdd($package, @{
+                        Success = $result.ExitCode -eq 0
+                        ExitCode = $result.ExitCode
+                        Output = $result.Output
+                        Error = $null
+                    })
                 }
-            }
-            'RunAsUser' {
-                # Execute as current user without elevation
-                $result = [ProcessExecutor]::ExecuteProcessAsUser($fullCommand, $false)
-                return @{
-                    ExitCode = $result.exitCode
-                    Output   = $result.output
+                catch {
+                    $results.TryAdd($package, @{
+                        Success = $false
+                        ExitCode = -1
+                        Output = $null
+                        Error = $_.Exception.Message
+                    })
                 }
-            }
-            'RunAsUserElevated' {
-                # Execute as current user with elevation
-                $result = [ProcessExecutor]::ExecuteProcessAsUser($fullCommand, $true)
-                return @{
-                    ExitCode = $result.exitCode
-                    Output   = $result.output
-                }
-            }
-            default {
-                throw "Unsupported execution environment: $ExecutionEnvironment"
+            }, $cts.Token)
+        }
+
+        # Wait for all tasks to complete with a maximum concurrent limit
+        for ($i = 0; $i -lt $tasks.Count; $i += $MaxConcurrent) {
+            $batch = $tasks | Select-Object -Skip $i -First $MaxConcurrent
+            [System.Threading.Tasks.Task]::WaitAll($batch)
+        }
+
+        # Return the results
+        return $results.ToArray() | ForEach-Object { 
+            [PSCustomObject]@{
+                Package = $_.Key
+                Success = $_.Value.Success
+                ExitCode = $_.Value.ExitCode
+                Output = $_.Value.Output
+                Error = $_.Value.Error
             }
         }
     }
-    catch {
-        Write-Error "Failed to execute WinGet: $_"
-        throw
+    finally {
+        $cts.Cancel()
+        $cts.Dispose()
     }
 }
 
 # Example usage:
-# Execute-WinGet -Command "install Microsoft.VisualStudioCode --accept-source-agreements" -ExecutionEnvironment RunAsUserElevated
-# Execute-WinGet -Command "list" -ExecutionEnvironment RunAsUser
-# Execute-WinGet -Command "upgrade --all" -ExecutionEnvironment System
+# $packages = @('Microsoft.PowerShell', 'Obsidian.Obsidian')
+# Execute-WinGet -Packages $packages -ExecutionEnvironment RunAsUserElevated -MaxConcurrent 3 -AcceptSourceAgreements -AcceptPackageAgreements
