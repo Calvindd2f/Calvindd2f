@@ -7,7 +7,7 @@ Add-Type -TypeDefinition @"
     }
 "@
 
-# Add our core execution context handler with async support
+# Add our core execution context handler
 Add-Type -TypeDefinition @"
 using System;
 using System.Runtime.InteropServices;
@@ -15,10 +15,7 @@ using System.Security.Principal;
 using System.Diagnostics;
 using System.ComponentModel;
 using System.Text;
-using System.Threading.Tasks;
-using System.Collections.Concurrent;
 using System.Linq;
-using System.Threading;
 
 public class ProcessExecutor {
     #region Win32 API Constants
@@ -66,13 +63,6 @@ public class ProcessExecutor {
         public IntPtr hThread;
         public uint dwProcessId;
         public uint dwThreadId;
-    }
-
-    [StructLayout(LayoutKind.Sequential)]
-    public struct SECURITY_ATTRIBUTES {
-        public int Length;
-        public IntPtr lpSecurityDescriptor;
-        public bool bInheritHandle;
     }
 
     [StructLayout(LayoutKind.Sequential)]
@@ -150,14 +140,13 @@ public class ProcessExecutor {
     private static extern bool CloseHandle(IntPtr hObject);
     #endregion
 
-    public static async Task<(int exitCode, string output)> ExecuteProcessAsUserAsync(string command, bool elevated, CancellationToken cancellationToken = default) {
+    public static (int exitCode, string output) ExecuteProcessAsUser(string command, bool elevated) {
         IntPtr hUserToken = IntPtr.Zero;
         IntPtr hDupToken = IntPtr.Zero;
         IntPtr hEnvironment = IntPtr.Zero;
         Process process = null;
 
         try {
-            // Get token from explorer process
             var explorerProcess = Process.GetProcessesByName("explorer").FirstOrDefault();
             if (explorerProcess == null)
                 throw new Exception("No user session found");
@@ -167,7 +156,6 @@ public class ProcessExecutor {
                 out hUserToken))
                 throw new Win32Exception(Marshal.GetLastWin32Error());
 
-            // Create duplicate token
             if (!DuplicateTokenEx(
                 hUserToken,
                 MAXIMUM_ALLOWED,
@@ -178,12 +166,10 @@ public class ProcessExecutor {
                 throw new Win32Exception(Marshal.GetLastWin32Error());
 
             if (elevated) {
-                // Enable necessary privileges for elevation
                 EnablePrivilege(hDupToken, SE_INCREASE_QUOTA_NAME);
                 EnablePrivilege(hDupToken, SE_ASSIGNPRIMARYTOKEN_NAME);
             }
 
-            // Create environment block
             if (!CreateEnvironmentBlock(out hEnvironment, hDupToken, false))
                 throw new Win32Exception(Marshal.GetLastWin32Error());
 
@@ -193,7 +179,6 @@ public class ProcessExecutor {
 
             var pi = new PROCESS_INFORMATION();
 
-            // Create process with duplicated token
             if (!CreateProcessAsUser(
                 hDupToken,
                 null,
@@ -209,24 +194,8 @@ public class ProcessExecutor {
                 throw new Win32Exception(Marshal.GetLastWin32Error());
 
             process = Process.GetProcessById((int)pi.dwProcessId);
-            
-            // Create a TaskCompletionSource for async wait
-            var tcs = new TaskCompletionSource<bool>();
-            
-            // Handle process exit asynchronously
-            process.EnableRaisingEvents = true;
-            process.Exited += (sender, args) => tcs.TrySetResult(true);
-            
-            // Register cancellation
-            cancellationToken.Register(() => {
-                try {
-                    if (!process.HasExited) process.Kill();
-                } catch { }
-            });
+            process.WaitForExit();
 
-            // Wait for either process exit or cancellation
-            await tcs.Task;
-            
             return (process.ExitCode, process.StandardOutput.ReadToEnd());
         }
         finally {
@@ -281,67 +250,99 @@ function Execute-WinGet {
         throw "WinGet not found at expected location: $wingetPath"
     }
 
-    # Create cancellation token source for managing concurrent operations
-    $cts = [System.Threading.CancellationTokenSource]::new()
-    
-    # Create a collection to store the results
-    $results = [System.Collections.Concurrent.ConcurrentDictionary[string,hashtable]]::new()
-    
+    $results = @{}
+    $runningJobs = @{}
+    $completedPackages = 0
+
     try {
-        # Create an array of installation tasks
-        $tasks = $Packages | ForEach-Object {
-            $package = $_
-            [System.Threading.Tasks.Task]::Run([Action]({
+        foreach ($package in $Packages) {
+            # Wait if we've hit the concurrent limit
+            while ($runningJobs.Count -ge $MaxConcurrent) {
+                $completed = $runningJobs.Keys | Where-Object { $runningJobs[$_].State -eq 'Completed' }
+                foreach ($jobId in $completed) {
+                    $job = $runningJobs[$jobId]
+                    $jobResult = Receive-Job -Job $job
+                    $results[$jobId] = $jobResult
+                    Remove-Job -Job $job
+                    $runningJobs.Remove($jobId)
+                    $completedPackages++
+                }
+                Start-Sleep -Milliseconds 100
+            }
+
+            $arguments = "install $package --silent"
+            if ($AcceptSourceAgreements) { $arguments += " --accept-source-agreements" }
+            if ($AcceptPackageAgreements) { $arguments += " --accept-package-agreements" }
+            
+            $fullCommand = "`"$wingetPath`" $arguments"
+            Write-Verbose "Starting installation of $package"
+
+            $scriptBlock = {
+                param($cmd, $env, $elevated)
+                
                 try {
-                    $arguments = "install $package --silent"
-                    if ($AcceptSourceAgreements) { $arguments += " --accept-source-agreements" }
-                    if ($AcceptPackageAgreements) { $arguments += " --accept-package-agreements" }
-                    
-                    $fullCommand = "`"$wingetPath`" $arguments"
-                    Write-Verbose "Executing command: $fullCommand"
-                    
-                    switch ($ExecutionEnvironment) {
+                    switch ($env) {
                         'System' {
-                            $process = Start-Process -FilePath $wingetPath -ArgumentList $arguments -Wait -PassThru -NoNewWindow
-                            $result = @{
+                            $process = Start-Process -FilePath $cmd.Split(' ')[0] -ArgumentList $cmd.Split(' ', 2)[1] -Wait -PassThru -NoNewWindow
+                            @{
+                                Success = $process.ExitCode -eq 0
                                 ExitCode = $process.ExitCode
                                 Output = ""
+                                Error = $null
                             }
                         }
                         'RunAsUser' {
-                            $result = [ProcessExecutor]::ExecuteProcessAsUserAsync($fullCommand, $false, $cts.Token).GetAwaiter().GetResult()
+                            $result = [ProcessExecutor]::ExecuteProcessAsUser($cmd, $false)
+                            @{
+                                Success = $result.exitCode -eq 0
+                                ExitCode = $result.exitCode
+                                Output = $result.output
+                                Error = $null
+                            }
                         }
                         'RunAsUserElevated' {
-                            $result = [ProcessExecutor]::ExecuteProcessAsUserAsync($fullCommand, $true, $cts.Token).GetAwaiter().GetResult()
+                            $result = [ProcessExecutor]::ExecuteProcessAsUser($cmd, $true)
+                            @{
+                                Success = $result.exitCode -eq 0
+                                ExitCode = $result.exitCode
+                                Output = $result.output
+                                Error = $null
+                            }
                         }
                     }
-                    
-                    $results.TryAdd($package, @{
-                        Success = $result.ExitCode -eq 0
-                        ExitCode = $result.ExitCode
-                        Output = $result.Output
-                        Error = $null
-                    })
                 }
                 catch {
-                    $results.TryAdd($package, @{
+                    @{
                         Success = $false
                         ExitCode = -1
                         Output = $null
                         Error = $_.Exception.Message
-                    })
+                    }
                 }
-            }), $cts.Token)
+            }
+
+            $job = Start-Job -ScriptBlock $scriptBlock -ArgumentList $fullCommand, $ExecutionEnvironment, ($ExecutionEnvironment -eq 'RunAsUserElevated')
+            $runningJobs[$package] = $job
         }
 
-        # Wait for all tasks to complete with a maximum concurrent limit
-        for ($i = 0; $i -lt $tasks.Count; $i += $MaxConcurrent) {
-            $batch = $tasks | Select-Object -Skip $i -First $MaxConcurrent
-            [System.Threading.Tasks.Task]::WaitAll($batch)
+        # Wait for remaining jobs
+        while ($runningJobs.Count -gt 0) {
+            $completed = $runningJobs.Keys | Where-Object { $runningJobs[$_].State -eq 'Completed' }
+            foreach ($jobId in $completed) {
+                $job = $runningJobs[$jobId]
+                $jobResult = Receive-Job -Job $job
+                $results[$jobId] = $jobResult
+                Remove-Job -Job $job
+                $runningJobs.Remove($jobId)
+                $completedPackages++
+            }
+            if ($runningJobs.Count -gt 0) {
+                Start-Sleep -Milliseconds 100
+            }
         }
 
-        # Return the results
-        return $results.ToArray() | ForEach-Object { 
+        # Return results
+        return $results.GetEnumerator() | ForEach-Object {
             [PSCustomObject]@{
                 Package = $_.Key
                 Success = $_.Value.Success
@@ -351,9 +352,18 @@ function Execute-WinGet {
             }
         }
     }
+    catch {
+        Write-Error "Error executing WinGet installations: $_"
+        throw
+    }
     finally {
-        $cts.Cancel()
-        $cts.Dispose()
+        # Cleanup any remaining jobs
+        $runningJobs.Values | ForEach-Object {
+            if ($_ -ne $null) {
+                Stop-Job -Job $_ -ErrorAction SilentlyContinue
+                Remove-Job -Job $_ -Force -ErrorAction SilentlyContinue
+            }
+        }
     }
 }
 
