@@ -331,7 +331,7 @@ function Execute-WinGet {
                         Error = $_.Exception.Message
                     })
                 }
-            }, $cts.Token)
+            }), $cts.Token)
         }
 
         # Wait for all tasks to complete with a maximum concurrent limit
