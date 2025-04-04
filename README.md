@@ -15,9 +15,7 @@ Here are some ideas to get you started:
 - ⚡ Fun fact: ...
 
 
-<a href="https://gitroll.io/profile/uS1StpVxHvMgnTSiP7EiouRhhai63" target="_blank"><img src="https://gitroll.io/api/badges/profiles/v1/uS1StpVxHvMgnTSiP7EiouRhhai63" alt="GitRoll Profile Badge"/></a>
-lol
--->
+<<a href="https://gitroll.io/profile/uS1StpVxHvMgnTSiP7EiouRhhai63" target="_blank"><img src="https://gitroll.io/api/badges/profiles/v1/uS1StpVxHvMgnTSiP7EiouRhhai63?theme=kawaiiCat" alt="GitRoll Profile Badge"/></a>
 
 
 [Microsoft Expert Certificed x2](https://learn.microsoft.com/en-us/users/calvinbergin/transcript/dz2oefqpj6xzqx1?ref=https%3A%2F%2Fwww.linkedin.com%2F&source=docs&tab=credentials-tab)
