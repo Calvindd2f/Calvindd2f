@@ -36,5 +36,11 @@ lol
 + OffSec SOC-100
 + Cisco CCNA
 
+---
+
+<a href="https://gitroll.io/profile/uS1StpVxHvMgnTSiP7EiouRhhai63" target="_blank"><img src="https://gitroll.io/api/badges/profiles/v1/uS1StpVxHvMgnTSiP7EiouRhhai63?theme=dark" alt="GitRoll Profile Badge"/></a>
+
+---
+
 ![Sneed's_feed_and_seed](https://user-images.githubusercontent.com/12518378/157051506-1efba280-c850-4aec-8332-63ec8b9f46c1.png)
 > The sign is a subtle joke. The shop is called "Sneed's Feed & Seed", where feed and seed both end in the sound "-eed", thus rhyming with the name of the owner, Sneed. The sign says that the shop was "Formerly Chuck's", implying that when Chuck owned the shop, it was called "Chuck's".
