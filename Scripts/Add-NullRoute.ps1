@@ -33,7 +33,7 @@ function Add-NullRoute {
     
     [CmdletBinding()]
     param (
-        [Parameter(Mandatory=$true, Position=0)]
+        [Parameter(Mandatory = $true, Position = 0)]
         [string]$HostName,
         
         [switch]$IPv6,
@@ -97,5 +97,15 @@ function Add-NullRoute {
     
     end {
         # Nothing to clean up
+        Write-Debug "Ending Add-NullRoute";
+        Write-Debug "Hosts file path: $hostsPath";
+        Write-Debug "IP Address: $ipAddress";
+        Write-Debug "Entry: $entry";
+        Write-Debug "Existing entry: $existingEntry";
+        Write-Debug "Content: $content";
+        Write-Debug "Pattern: $pattern";
+        #--------
+        Write-Debug "You also could have just done this: echo "127.0.0.1 example.com" >> "C:\WINDOWS\System32\drivers\etc\hosts"";
+        
     }
 }

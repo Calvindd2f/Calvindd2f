@@ -1,13 +1,167 @@
-# First, define our execution environment enum
+# CTX ENUM
 Add-Type -TypeDefinition @"
-    public enum ExecutionEnvironment {
+    public enum ExecContext {
         System,             // Run as SYSTEM (default for RMM)
         RunAsUser,          // Run as logged-in user
         RunAsUserElevated   // Run as logged-in user with elevation
     }
 "@
 
-# Add our core execution context handler
+# ASYNC EXECUTOR
+Add-Type -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
+using System.Security.Principal;
+using System.Diagnostics;
+using System.ComponentModel;
+using System.Text;
+using System.Linq;
+using System.Threading;
+using System.Threading.Tasks;
+using System.Collections.Concurrent;
+
+public class AsyncExecutor {
+    #region Win32 API Constants
+    private const uint INFINITE = 0xFFFFFFFF;
+    private const uint WAIT_OBJECT_0 = 0;
+    private const uint WAIT_TIMEOUT = 0x00000102;
+    private const uint FILE_FLAG_OVERLAPPED = 0x40000000;
+    private const uint GENERIC_READ = 0x80000000;
+    private const uint GENERIC_WRITE = 0x40000000;
+    private const uint OPEN_EXISTING = 3;
+    private const uint CREATE_NEW = 1;
+    private const uint FILE_ATTRIBUTE_NORMAL = 0x00000080;
+    #endregion
+
+    #region Win32 API Structures
+    [StructLayout(LayoutKind.Sequential)]
+    public struct OVERLAPPED {
+        public IntPtr Internal;
+        public IntPtr InternalHigh;
+        public uint Offset;
+        public uint OffsetHigh;
+        public IntPtr hEvent;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    public struct SECURITY_ATTRIBUTES {
+        public int nLength;
+        public IntPtr lpSecurityDescriptor;
+        public bool bInheritHandle;
+    }
+    #endregion
+
+    #region Win32 API Imports
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern IntPtr CreateIoCompletionPort(
+        IntPtr FileHandle,
+        IntPtr ExistingCompletionPort,
+        UIntPtr CompletionKey,
+        uint NumberOfConcurrentThreads);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool GetQueuedCompletionStatus(
+        IntPtr CompletionPort,
+        out uint lpNumberOfBytesTransferred,
+        out UIntPtr lpCompletionKey,
+        out IntPtr lpOverlapped,
+        uint dwMilliseconds);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool PostQueuedCompletionStatus(
+        IntPtr CompletionPort,
+        uint dwNumberOfBytesTransferred,
+        UIntPtr dwCompletionKey,
+        IntPtr lpOverlapped);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern IntPtr CreateThreadpool(
+        IntPtr reserved);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool SetThreadpoolThreadMaximum(
+        IntPtr ptpp,
+        uint cThreads);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool SetThreadpoolThreadMinimum(
+        IntPtr ptpp,
+        uint cThreads);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern IntPtr CreateThreadpoolWork(
+        IntPtr pfnwk,
+        IntPtr pv,
+        IntPtr pcbe);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern void SubmitThreadpoolWork(
+        IntPtr pwk);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern void WaitForThreadpoolWorkCallbacks(
+        IntPtr pwk,
+        bool fCancelPendingCallbacks);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern void CloseThreadpoolWork(
+        IntPtr pwk);
+    #endregion
+
+    private IntPtr _completionPort;
+    private IntPtr _threadPool;
+    private ConcurrentDictionary<UIntPtr, TaskCompletionSource<object>> _pendingOperations;
+    private CancellationTokenSource _cts;
+
+    public AsyncExecutor(uint maxConcurrentThreads = 0) {
+        _completionPort = CreateIoCompletionPort(IntPtr.Zero, IntPtr.Zero, UIntPtr.Zero, maxConcurrentThreads);
+        _threadPool = CreateThreadpool(IntPtr.Zero);
+        _pendingOperations = new ConcurrentDictionary<UIntPtr, TaskCompletionSource<object>>();
+        _cts = new CancellationTokenSource();
+
+        if (maxConcurrentThreads > 0) {
+            SetThreadpoolThreadMaximum(_threadPool, maxConcurrentThreads);
+            SetThreadpoolThreadMinimum(_threadPool, maxConcurrentThreads);
+        }
+    }
+
+    public async Task<T> ExecuteAsync<T>(Func<T> operation) {
+        var tcs = new TaskCompletionSource<object>();
+        var key = new UIntPtr((uint)_pendingOperations.Count);
+        _pendingOperations[key] = tcs;
+
+        var work = CreateThreadpoolWork(
+            Marshal.GetFunctionPointerForDelegate(new Action(() => {
+                try {
+                    var result = operation();
+                    PostQueuedCompletionStatus(_completionPort, 0, key, IntPtr.Zero);
+                    tcs.SetResult(result);
+                }
+                catch (Exception ex) {
+                    tcs.SetException(ex);
+                }
+            })),
+            IntPtr.Zero,
+            IntPtr.Zero);
+
+        SubmitThreadpoolWork(work);
+        WaitForThreadpoolWorkCallbacks(work, false);
+        CloseThreadpoolWork(work);
+
+        return await (Task<T>)tcs.Task;
+    }
+
+    public void Dispose() {
+        _cts.Cancel();
+        if (_completionPort != IntPtr.Zero) {
+            PostQueuedCompletionStatus(_completionPort, 0, UIntPtr.Zero, IntPtr.Zero);
+        }
+        _pendingOperations.Clear();
+    }
+}
+"@
+
+# CONTEXT HANDLER
 Add-Type -TypeDefinition @"
 using System;
 using System.Runtime.InteropServices;
@@ -222,6 +376,7 @@ public class ProcessExecutor {
 }
 "@
 
+# EXECUTE-WINGET
 function Execute-WinGet {
     [CmdletBinding()]
     param (
@@ -251,25 +406,11 @@ function Execute-WinGet {
     }
 
     $results = @{}
-    $runningJobs = @{}
-    $completedPackages = 0
+    $executor = [AsyncExecutor]::new([uint]$MaxConcurrent)
+    $tasks = @()
 
     try {
         foreach ($package in $Packages) {
-            # Wait if we've hit the concurrent limit
-            while ($runningJobs.Count -ge $MaxConcurrent) {
-                $completed = $runningJobs.Keys | Where-Object { $runningJobs[$_].State -eq 'Completed' }
-                foreach ($jobId in $completed) {
-                    $job = $runningJobs[$jobId]
-                    $jobResult = Receive-Job -Job $job
-                    $results[$jobId] = $jobResult
-                    Remove-Job -Job $job
-                    $runningJobs.Remove($jobId)
-                    $completedPackages++
-                }
-                Start-Sleep -Milliseconds 100
-            }
-
             $arguments = "install $package --silent"
             if ($AcceptSourceAgreements) { $arguments += " --accept-source-agreements" }
             if ($AcceptPackageAgreements) { $arguments += " --accept-package-agreements" }
@@ -277,7 +418,7 @@ function Execute-WinGet {
             $fullCommand = "`"$wingetPath`" $arguments"
             Write-Verbose "Starting installation of $package"
 
-            $scriptBlock = {
+            $task = $executor.ExecuteAsync({
                 param($cmd, $env, $elevated)
                 
                 try {
@@ -319,26 +460,18 @@ function Execute-WinGet {
                         Error = $_.Exception.Message
                     }
                 }
-            }
+            }, $fullCommand, $ExecutionEnvironment, ($ExecutionEnvironment -eq 'RunAsUserElevated'))
 
-            $job = Start-Job -ScriptBlock $scriptBlock -ArgumentList $fullCommand, $ExecutionEnvironment, ($ExecutionEnvironment -eq 'RunAsUserElevated')
-            $runningJobs[$package] = $job
+            $tasks += @{
+                Package = $package
+                Task = $task
+            }
         }
 
-        # Wait for remaining jobs
-        while ($runningJobs.Count -gt 0) {
-            $completed = $runningJobs.Keys | Where-Object { $runningJobs[$_].State -eq 'Completed' }
-            foreach ($jobId in $completed) {
-                $job = $runningJobs[$jobId]
-                $jobResult = Receive-Job -Job $job
-                $results[$jobId] = $jobResult
-                Remove-Job -Job $job
-                $runningJobs.Remove($jobId)
-                $completedPackages++
-            }
-            if ($runningJobs.Count -gt 0) {
-                Start-Sleep -Milliseconds 100
-            }
+        # Wait for all tasks to complete
+        $tasks | ForEach-Object {
+            $result = $_.Task.GetAwaiter().GetResult()
+            $results[$_.Package] = $result
         }
 
         # Return results
@@ -357,16 +490,10 @@ function Execute-WinGet {
         throw
     }
     finally {
-        # Cleanup any remaining jobs
-        $runningJobs.Values | ForEach-Object {
-            if ($_ -ne $null) {
-                Stop-Job -Job $_ -ErrorAction SilentlyContinue
-                Remove-Job -Job $_ -Force -ErrorAction SilentlyContinue
-            }
-        }
+        $executor.Dispose()
     }
 }
 
 # Example usage:
-# $packages = @('Microsoft.PowerShell', 'Obsidian.Obsidian')
-# Execute-WinGet -Packages $packages -ExecutionEnvironment RunAsUserElevated -MaxConcurrent 3 -AcceptSourceAgreements -AcceptPackageAgreements
+$packages = @('Microsoft.PowerShell', 'Obsidian.Obsidian')
+Execute-WinGet -Packages $packages -ExecutionEnvironment RunAsUserElevated -MaxConcurrent 3 -AcceptSourceAgreements -AcceptPackageAgreements
