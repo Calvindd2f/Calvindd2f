@@ -1,156 +1,119 @@
 #Requires -RunAsAdministrator
 
 [CmdletBinding()]
-Param (
+param(
     $LogProfile = $null,
-    [switch]$Dump = $false
-   )
+    [switch]$Dump
+)
 
 Set-StrictMode -Version Latest
 
-$folder = "WslLogs-" + (Get-Date -Format "yyyy-MM-dd_HH-mm-ss")
-mkdir -p $folder | Out-Null
+$folder = "WslLogs-$(Get-Date -Format 'yyyy-MM-dd_HH-mm-ss')"
+New-Item -ItemType Directory -Path $folder -Force | Out-Null
 
-if ($LogProfile -eq $null -Or ![System.IO.File]::Exists($LogProfile))
-{
-    if ($LogProfile -eq $null)
-    {
-        $url = "https://raw.githubusercontent.com/microsoft/WSL/master/diagnostics/wsl.wprp"
+# Download log profile if needed
+if (-not $LogProfile -or -not (Test-Path $LogProfile)) {
+    $urls = @{
+        $null = "https://raw.githubusercontent.com/microsoft/WSL/master/diagnostics/wsl.wprp"
+        "storage" = "https://raw.githubusercontent.com/microsoft/WSL/master/diagnostics/wsl_storage.wprp"
     }
-    elseif ($LogProfile -eq "storage")
-    {
-         $url = "https://raw.githubusercontent.com/microsoft/WSL/master/diagnostics/wsl_storage.wprp"
-    }
-    else
-    {
+    
+    if (-not $urls.ContainsKey($LogProfile)) {
         Write-Error "Unknown log profile: $LogProfile"
         exit 1
     }
-
+    
     $LogProfile = "$folder/wsl.wprp"
-    try {
-        Invoke-WebRequest -UseBasicParsing $url -OutFile $LogProfile
-    }
-    catch {
-        throw
-    }
+    Invoke-WebRequest -UseBasicParsing $urls[$LogProfile -eq "$folder/wsl.wprp" ? $null : $LogProfile] -OutFile $LogProfile
 }
 
-reg.exe export HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Lxss $folder/HKCU.txt | Out-Null
-reg.exe export HKEY_LOCAL_MACHINE\Software\Microsoft\Windows\CurrentVersion\Lxss $folder/HKLM.txt | Out-Null
-reg.exe export HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Services\P9NP $folder/P9NP.txt | Out-Null
-reg.exe export HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Services\WinSock2 $folder/Winsock2.txt | Out-Null
-reg.exe export "HKEY_CLASSES_ROOT\CLSID\{e66b0f30-e7b4-4f8c-acfd-d100c46c6278}" $folder/wslsupport-proxy.txt | Out-Null
-reg.exe export "HKEY_CLASSES_ROOT\CLSID\{a9b7a1b9-0671-405c-95f1-e0612cb4ce7e}" $folder/wslsupport-impl.txt | Out-Null
+# Export registry keys
+$regKeys = @{
+    "HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Lxss" = "HKCU.txt"
+    "HKEY_LOCAL_MACHINE\Software\Microsoft\Windows\CurrentVersion\Lxss" = "HKLM.txt"
+    "HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Services\P9NP" = "P9NP.txt"
+    "HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Services\WinSock2" = "Winsock2.txt"
+    "HKEY_CLASSES_ROOT\CLSID\{e66b0f30-e7b4-4f8c-acfd-d100c46c6278}" = "wslsupport-proxy.txt"
+    "HKEY_CLASSES_ROOT\CLSID\{a9b7a1b9-0671-405c-95f1-e0612cb4ce7e}" = "wslsupport-impl.txt"
+}
 
+$regKeys.GetEnumerator() | ForEach-Object {
+    reg.exe export $_.Key "$folder/$($_.Value)" 2>$null | Out-Null
+}
+
+# Copy WSL config if exists
 $wslconfig = "$env:USERPROFILE/.wslconfig"
-if (Test-Path $wslconfig)
-{
-    Copy-Item $wslconfig $folder | Out-Null
+if (Test-Path $wslconfig) {
+    Copy-Item $wslconfig $folder
 }
 
-get-appxpackage MicrosoftCorporationII.WindowsSubsystemforLinux -ErrorAction Ignore > $folder/appxpackage.txt
-get-acl "C:\ProgramData\Microsoft\Windows\WindowsApps" -ErrorAction Ignore | Format-List > $folder/acl.txt
-Get-WindowsOptionalFeature -Online > $folder/optional-components.txt
-bcdedit.exe > $folder/bcdedit.txt
+# Collect system information
+Get-AppxPackage MicrosoftCorporationII.WindowsSubsystemforLinux -ErrorAction Ignore > "$folder/appxpackage.txt"
+Get-Acl "C:\ProgramData\Microsoft\Windows\WindowsApps" -ErrorAction Ignore | Format-List > "$folder/acl.txt"
+Get-WindowsOptionalFeature -Online > "$folder/optional-components.txt"
+bcdedit.exe > "$folder/bcdedit.txt"
 
-$wprOutputLog = "$folder/wpr.txt"
+# Start WPR logging
+$wprLog = "$folder/wpr.txt"
+wpr.exe -start $LogProfile -filemode 2>&1 >> $wprLog
 
-wpr.exe -start $LogProfile -filemode 2>&1 >> $wprOutputLog
-if ($LastExitCode -Ne 0)
-{
-    Write-Host -ForegroundColor Yellow "Log collection failed to start (exit code: $LastExitCode), trying to reset it."
-    wpr.exe -cancel 2>&1 >> $wprOutputLog
-
-    wpr.exe -start $LogProfile -filemode 2>&1 >> $wprOutputLog
-    if ($LastExitCode -Ne 0)
-    {
-        Write-Host -ForegroundColor Red "Couldn't start log collection (exitCode: $LastExitCode)"
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "Log collection failed, resetting..." -ForegroundColor Yellow
+    wpr.exe -cancel 2>&1 >> $wprLog
+    wpr.exe -start $LogProfile -filemode 2>&1 >> $wprLog
+    
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "Couldn't start log collection (exit code: $LASTEXITCODE)" -ForegroundColor Red
     }
 }
 
-try
-{
-    Write-Host -NoNewLine "Log collection is running. Please "
-    Write-Host -NoNewLine -ForegroundColor Red "reproduce the problem "
-    Write-Host -NoNewLine "and once done press any key to save the logs."
-
-    $KeysToIgnore =
-          16,  # Shift (left or right)
-          17,  # Ctrl (left or right)
-          18,  # Alt (left or right)
-          20,  # Caps lock
-          91,  # Windows key (left)
-          92,  # Windows key (right)
-          93,  # Menu key
-          144, # Num lock
-          145, # Scroll lock
-          166, # Back
-          167, # Forward
-          168, # Refresh
-          169, # Stop
-          170, # Search
-          171, # Favorites
-          172, # Start/Home
-          173, # Mute
-          174, # Volume Down
-          175, # Volume Up
-          176, # Next Track
-          177, # Previous Track
-          178, # Stop Media
-          179, # Play
-          180, # Mail
-          181, # Select Media
-          182, # Application 1
-          183  # Application 2
-
-    $Key = $null
-    while ($Key -Eq $null -Or $Key.VirtualKeyCode -Eq $null -Or $KeysToIgnore -Contains $Key.VirtualKeyCode)
-    {
-        $Key = $Host.UI.RawUI.ReadKey('NoEcho,IncludeKeyDown')
-    }
-
+try {
+    Write-Host "Log collection running. " -NoNewline
+    Write-Host "Reproduce the problem " -ForegroundColor Red -NoNewline
+    Write-Host "then press any key to save logs."
+    
+    # Wait for valid key press (excluding modifier keys)
+    $ignoreKeys = 16,17,18,20,91,92,93,144,145,166..183
+    do {
+        $key = $Host.UI.RawUI.ReadKey('NoEcho,IncludeKeyDown')
+    } while ($key.VirtualKeyCode -in $ignoreKeys)
+    
     Write-Host "`nSaving logs..."
 }
-finally
-{
-    wpr.exe -stop $folder/logs.etl 2>&1 >> $wprOutputLog
+finally {
+    wpr.exe -stop "$folder/logs.etl" 2>&1 >> $wprLog
 }
 
-if ($Dump)
-{
-    $Assembly = [PSObject].Assembly.GetType('System.Management.Automation.WindowsErrorReporting')
-    $DumpMethod = $Assembly.GetNestedType('NativeMethods', 'NonPublic').GetMethod('MiniDumpWriteDump', [Reflection.BindingFlags] 'NonPublic, Static')
-
-    $dumpFolder = Join-Path (Resolve-Path "$folder") dumps
-    New-Item -ItemType "directory" -Path "$dumpFolder"
-
-    $executables = "wsl", "wslservice", "wslhost", "msrdc"
-    foreach($process in Get-Process | Where-Object { $executables -contains $_.ProcessName})
-    {
-        $dumpFile =  "$dumpFolder/$($process.ProcessName).$($process.Id).dmp"
-        Write-Host "Writing $($dumpFile)"
-
-        $OutputFile = New-Object IO.FileStream($dumpFile, [IO.FileMode]::Create)
-
-        $Result = $DumpMethod.Invoke($null, @($process.Handle,
-                                              $process.id,
-                                              $OutputFile.SafeFileHandle,
-                                              [UInt32] 2,
-                                              [IntPtr]::Zero,
-                                              [IntPtr]::Zero,
-                                              [IntPtr]::Zero))
-
-        $OutputFile.Close()
-        if (-not $Result)
-        {
-            Write-Host "Failed to write dump for: $($dumpFile)"
+# Create process dumps if requested
+if ($Dump) {
+    $dumpFolder = "$folder/dumps"
+    New-Item -ItemType Directory -Path $dumpFolder -Force | Out-Null
+    
+    $assembly = [PSObject].Assembly.GetType('System.Management.Automation.WindowsErrorReporting')
+    $dumpMethod = $assembly.GetNestedType('NativeMethods', 'NonPublic').GetMethod('MiniDumpWriteDump', 'NonPublic,Static')
+    
+    Get-Process | Where-Object { $_.ProcessName -in @("wsl", "wslservice", "wslhost", "msrdc") } | ForEach-Object {
+        $dumpFile = "$dumpFolder/$($_.ProcessName).$($_.Id).dmp"
+        Write-Host "Writing $dumpFile"
+        
+        try {
+            $fileStream = [IO.FileStream]::new($dumpFile, [IO.FileMode]::Create)
+            $result = $dumpMethod.Invoke($null, @($_.Handle, $_.Id, $fileStream.SafeFileHandle, 2, [IntPtr]::Zero, [IntPtr]::Zero, [IntPtr]::Zero))
+            $fileStream.Close()
+            
+            if (-not $result) {
+                Write-Host "Failed to write dump for: $dumpFile"
+            }
+        }
+        catch {
+            Write-Warning "Failed to create dump for $($_.ProcessName): $($_.Exception.Message)"
         }
     }
 }
 
+# Create archive and cleanup
 $logArchive = "$(Resolve-Path $folder).zip"
-Compress-Archive -Path $folder -DestinationPath $logArchive
-Remove-Item $folder -Recurse
+Compress-Archive -Path $folder -DestinationPath $logArchive -Force
+Remove-Item $folder -Recurse -Force
 
-Write-Host -ForegroundColor Green "Logs saved in: $logArchive. Please attach that file to the GitHub issue."
+Write-Host "Logs saved in: $logArchive. Please attach to GitHub issue." -ForegroundColor Green
