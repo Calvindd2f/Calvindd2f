@@ -16,6 +16,12 @@ Removes Office without reinstalling.
 
 .EXAMPLE
 Remove-Office -Reinstall64
+
+.NOTES
+Author: Calvindd2f
+Version: 2.0.0
+Date: 2025-06-26
+
 #>
 
 [CmdletBinding()]
