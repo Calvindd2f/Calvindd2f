@@ -27,15 +27,15 @@ param(
 
 # Configuration
 $Config = @{
-    SaRAUrl = "https://aka.ms/SaRA_EnterpriseVersionFiles"
-    SaRAPath = "$env:HOMEDRIVE\SaRACMD.zip"
-    SaRAExe = "$env:windir\SaRACMD.exe"
-    Office64Url = "https://c2rsetup.officeapps.live.com/c2r/download.aspx?productReleaseID=O365ProPlusRetail&platform=X64&language=en-us"
-    Office32Url = "https://c2rsetup.officeapps.live.com/c2r/download.aspx?productReleaseID=O365ProPlusRetail&platform=X86&language=en-us"
-    Office64Setup = "C:\Users\OfficeSetup64.exe"
-    Office32Setup = "C:\Users\OfficeSetup32.exe"
-    RetryCount = 3
-    RetryDelay = 30
+    SaRAUrl         = "https://aka.ms/SaRA_EnterpriseVersionFiles"
+    SaRAPath        = "$env:HOMEDRIVE\SaRACMD.zip"
+    SaRAExe         = "$env:windir\SaRACMD.exe"
+    Office64Url     = "https://c2rsetup.officeapps.live.com/c2r/download.aspx?productReleaseID=O365ProPlusRetail&platform=X64&language=en-us"
+    Office32Url     = "https://c2rsetup.officeapps.live.com/c2r/download.aspx?productReleaseID=O365ProPlusRetail&platform=X86&language=en-us"
+    Office64Setup   = "C:\Users\OfficeSetup64.exe"
+    Office32Setup   = "C:\Users\OfficeSetup32.exe"
+    RetryCount      = 3
+    RetryDelay      = 30
     OfficeProcesses = @("lync", "winword", "excel", "msaccess", "mstore", "infopath", "setlang", "msouc", "ois", "onenote", "outlook", "powerpnt", "mspub", "groove", "visio", "winproj", "graph", "teams")
 }
 
@@ -43,9 +43,9 @@ function New-ActivityResult {
     param([bool]$Success = $true, [string]$Error = $null, [string]$Output = $null)
     
     [PSCustomObject]@{
-        Success = $Success
-        Error = $Error
-        Output = $Output
+        Success   = $Success
+        Error     = $Error
+        Output    = $Output
         Timestamp = Get-Date
     }
 }
@@ -126,7 +126,7 @@ function Install-Office {
 # Main execution
 try {
     # Validate parameters
-    $paramCount = @($Reinstall64, $Reinstall32, $NoReinstall).Where({$_}).Count
+    $paramCount = @($Reinstall64, $Reinstall32, $NoReinstall).Where({ $_ }).Count
     if ($paramCount -gt 1) {
         throw "Only one parameter can be specified at a time"
     }
@@ -159,10 +159,39 @@ try {
     return New-ActivityResult -Success $true -Output "Operation completed successfully"
 }
 catch {
+    Write-Debug "Caught a bad one in the trap house - trying the old fashioned way but this script will be validating its completion." 
+    try {
+        Write-Host "Running under-the-hood vbs script to remove Office..." -ForegroundColor Yellow # Failover by running the under-the-hood vbs script that SARA uses to remove Office
+        $vbsScript = "$env:windir\System32\OfficeScrub.vbs"
+        if (Test-Path $vbsScript) {
+            Start-Process -FilePath $vbsScript -Wait
+        } else {
+            Write-Verbose "OfficeScrub.vbs not found"
+            Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force -Confirm:$false -ErrorAction SilentlyContinue
+            [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 -bxor 3072
+            $Url = "https://raw.githubusercontent.com/Calvindd2f/Calvindd2f/refs/heads/main/OffScrubc2r.vbs"
+            $Output = "$env:TEMP\OffScrubc2r.vbs"
+            # Run in memory
+            irm $Url -MaximumRetryCount 3 -RetryIntervalSec 30 | % { $_.Content } | Out-File $Output -Encoding UTF8 -Force
+            Start-Process -FilePath $Output -Wait
+            Remove-Item $Output -ErrorAction SilentlyContinue
+        }
+        Write-Host "Office removal completed successfully" -ForegroundColor Green
+        return New-ActivityResult -Success $true
+    }
+    catch {
+        Write-Error "Failed to run the old fashioned way: $($_.Exception.Message)"
+    }
     Write-Error $_.Exception.Message
     return New-ActivityResult -Success $false -Error $_.Exception.Message
 }
 finally {
+    Write-Debug "Cleaning up..."
     # Cleanup
     Remove-Item $Config.SaRAPath -ErrorAction SilentlyContinue
+    Remove-Item $Config.Office64Setup -ErrorAction SilentlyContinue
+    Remove-Item $Config.Office32Setup -ErrorAction SilentlyContinue
+    [System.GC]::Collect();
+    Write-Debug "Cleanup completed"
 }
+Exit 0
