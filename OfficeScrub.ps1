@@ -1,62 +1,168 @@
-nction NukeOffice {
-    param(
-        [switch]$Reinstall64,
-        [switch]$Reinstall32,
-        [switch]$noreinstall
-    )
+<#
+.SYNOPSIS
+Removes Office installations and optionally reinstalls them (64-bit or 32-bit).
 
-    [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+.DESCRIPTION
+Removes existing Office installations using SaRACMD tool and optionally reinstalls Office.
 
-    $zipPath = Join-Path -Path $env:HOMEDRIVE -ChildPath "SaRACMD.zip"
-    $downloadUrl = "https://aka.ms/SaRA_EnterpriseVersionFiles"
-    $O365setup64 = "C:\Users\OfficeSetup64.exe"
-    $O365setup32 = "C:\Users\OfficeSetup32.exe"
-    $O365Url64 = "https://c2rsetup.officeapps.live.com/c2r/download.aspx?productReleaseID=O365ProPlusRetail&platform=X64&language=en-us"
-    $O365Url32 = "https://c2rsetup.officeapps.live.com/c2r/download.aspx?productReleaseID=O365ProPlusRetail&platform=X86&language=en-us"
-    $retry = 3
-    $timeout = 30
-    $killIfinvokefails = @("lync", "winword", "excel", "msaccess", "mstore", "infopath", "setlang", "msouc", "ois", "onenote", "outlook", "powerpnt", "mspub", "groove", "visio", "winproj", "graph", "teams")
+.PARAMETER Reinstall64
+Reinstalls 64-bit Office after removal.
 
-    #download extract
-    [console]::writeline("Downloading SaRACMD tool...")
-    $attempt = 0
-    while ($attempt -lt $retry) {
-        try {
-            Invoke-WebRequest -Uri $downloadUrl -OutFile $zipPath
-            [System.IO.Compression.ZipFile]::ExtractToDirectory($zipPath, $env:windir) #this is if using shit ps version like in datto agent browser.
-            break
-        } catch {
-            Write-Warning "Attempt failed. Error: $_"
-            $attempt++
-            if ($attempt -eq $retry) {
-                throw "Failed to download SaRACMD after $retry attempts."
-            }
-            Start-Sleep -Seconds $timeout
-        }
-    }
+.PARAMETER Reinstall32
+Reinstalls 32-bit Office after removal.
 
-    #invoek
-    try {
-        & "$env:windir\SaRACMD.exe" -S OfficeScrubScenario -AcceptEula -OfficeVersion All #most likely issue is office processes are running.
-    } catch {
-        Write-Warning "Execution failed. Attempting to stop running Office processes..."
-        $killIfinvokefails | ForEach-Object {
-            Get-Process $_ -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
-        }
-        throw "Failed to execute SaRACMD after stopping processes. Error: $_"
-    }
+.PARAMETER NoReinstall
+Removes Office without reinstalling.
 
+.EXAMPLE
+Remove-Office -Reinstall64
+#>
 
-    if ($Reinstall64) {
-        [console]::writeline("Reinstalling 64bit...") #device should probably be rebooted before this. very basic office configuration
-        Invoke-WebRequest -Uri $O365Url64 -OutFile $O365setup64
-        Start-Process -FilePath $O365setup64 -Wait
-    } elseif ($Reinstall32) {
-        [console]::writeline( "Reinstalling 32-bit...") #device should probably be rebooted before this. very basic office configuration
-        Invoke-WebRequest -Uri $O365Url32 -OutFile $O365setup32
-        Start-Process -FilePath $O365setup32 -Wait
-    } elseif ($noreinstall){
-        [console]::writeline("Done")
+[CmdletBinding()]
+param(
+    [switch]$Reinstall64,
+    [switch]$Reinstall32,
+    [switch]$NoReinstall
+)
+
+# Configuration
+$Config = @{
+    SaRAUrl = "https://aka.ms/SaRA_EnterpriseVersionFiles"
+    SaRAPath = "$env:HOMEDRIVE\SaRACMD.zip"
+    SaRAExe = "$env:windir\SaRACMD.exe"
+    Office64Url = "https://c2rsetup.officeapps.live.com/c2r/download.aspx?productReleaseID=O365ProPlusRetail&platform=X64&language=en-us"
+    Office32Url = "https://c2rsetup.officeapps.live.com/c2r/download.aspx?productReleaseID=O365ProPlusRetail&platform=X86&language=en-us"
+    Office64Setup = "C:\Users\OfficeSetup64.exe"
+    Office32Setup = "C:\Users\OfficeSetup32.exe"
+    RetryCount = 3
+    RetryDelay = 30
+    OfficeProcesses = @("lync", "winword", "excel", "msaccess", "mstore", "infopath", "setlang", "msouc", "ois", "onenote", "outlook", "powerpnt", "mspub", "groove", "visio", "winproj", "graph", "teams")
+}
+
+function New-ActivityResult {
+    param([bool]$Success = $true, [string]$Error = $null, [string]$Output = $null)
+    
+    [PSCustomObject]@{
+        Success = $Success
+        Error = $Error
+        Output = $Output
+        Timestamp = Get-Date
     }
 }
-NukeOffice -noreinstall
+
+function Stop-OfficeProcesses {
+    Write-Verbose "Stopping Office processes..."
+    $Config.OfficeProcesses | ForEach-Object {
+        Get-Process $_ -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+    }
+}
+
+function Install-SaRATool {
+    Write-Host "Downloading SaRA tool..." -ForegroundColor Yellow
+    
+    [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+    
+    for ($attempt = 1; $attempt -le $Config.RetryCount; $attempt++) {
+        try {
+            Invoke-WebRequest -Uri $Config.SaRAUrl -OutFile $Config.SaRAPath -UseBasicParsing
+            Expand-Archive $Config.SaRAPath -DestinationPath $env:windir -Force
+            
+            if (Test-Path $Config.SaRAExe) {
+                Write-Host "SaRA tool downloaded successfully" -ForegroundColor Green
+                return New-ActivityResult -Success $true
+            }
+        }
+        catch {
+            Write-Warning "Download attempt $attempt failed: $($_.Exception.Message)"
+            if ($attempt -lt $Config.RetryCount) {
+                Start-Sleep -Seconds $Config.RetryDelay
+            }
+        }
+    }
+    
+    return New-ActivityResult -Success $false -Error "Failed to download SaRA tool after $($Config.RetryCount) attempts"
+}
+
+function Remove-OfficeInstallation {
+    Write-Host "Removing Office installation..." -ForegroundColor Yellow
+    
+    try {
+        $process = Start-Process -FilePath $Config.SaRAExe -ArgumentList "-S", "OfficeScrubScenario", "-AcceptEula", "-OfficeVersion", "All" -Wait -PassThru
+        
+        if ($process.ExitCode -eq 0) {
+            Write-Host "Office removal completed successfully" -ForegroundColor Green
+            return New-ActivityResult -Success $true
+        }
+        else {
+            throw "SaRA tool exited with code $($process.ExitCode)"
+        }
+    }
+    catch {
+        Write-Warning "Office removal failed: $($_.Exception.Message)"
+        Stop-OfficeProcesses
+        return New-ActivityResult -Success $false -Error $_.Exception.Message
+    }
+}
+
+function Install-Office {
+    param([string]$Architecture)
+    
+    $url = if ($Architecture -eq "64") { $Config.Office64Url } else { $Config.Office32Url }
+    $setupPath = if ($Architecture -eq "64") { $Config.Office64Setup } else { $Config.Office32Setup }
+    
+    Write-Host "Installing Office $Architecture-bit..." -ForegroundColor Yellow
+    
+    try {
+        Invoke-WebRequest -Uri $url -OutFile $setupPath -UseBasicParsing
+        Start-Process -FilePath $setupPath -Wait
+        Write-Host "Office $Architecture-bit installation completed" -ForegroundColor Green
+        return New-ActivityResult -Success $true
+    }
+    catch {
+        return New-ActivityResult -Success $false -Error "Failed to install Office $Architecture-bit: $($_.Exception.Message)"
+    }
+}
+
+# Main execution
+try {
+    # Validate parameters
+    $paramCount = @($Reinstall64, $Reinstall32, $NoReinstall).Where({$_}).Count
+    if ($paramCount -gt 1) {
+        throw "Only one parameter can be specified at a time"
+    }
+    
+    # Install SaRA tool
+    $saraResult = Install-SaRATool
+    if (-not $saraResult.Success) {
+        throw $saraResult.Error
+    }
+    
+    # Remove Office
+    $removeResult = Remove-OfficeInstallation
+    if (-not $removeResult.Success) {
+        throw $removeResult.Error
+    }
+    
+    # Reinstall if requested
+    if ($Reinstall64) {
+        $installResult = Install-Office -Architecture "64"
+        if (-not $installResult.Success) { throw $installResult.Error }
+    }
+    elseif ($Reinstall32) {
+        $installResult = Install-Office -Architecture "32"
+        if (-not $installResult.Success) { throw $installResult.Error }
+    }
+    else {
+        Write-Host "Office removal completed. No reinstallation requested." -ForegroundColor Green
+    }
+    
+    return New-ActivityResult -Success $true -Output "Operation completed successfully"
+}
+catch {
+    Write-Error $_.Exception.Message
+    return New-ActivityResult -Success $false -Error $_.Exception.Message
+}
+finally {
+    # Cleanup
+    Remove-Item $Config.SaRAPath -ErrorAction SilentlyContinue
+}
